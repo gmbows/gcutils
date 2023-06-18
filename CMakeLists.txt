@@ -10,6 +10,8 @@ add_library(gcutils SHARED
   gcutils_global.h
   gcutils.cpp
   gcutils.h
+  error.h
+  error.cpp
 )
 
 #set_target_properties(gcutils PROPERTIES SOVERSION 1)

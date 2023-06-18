@@ -1,6 +1,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -9,9 +10,12 @@
 #include <thread>
 #include <mutex>
 #include <functional>
+#include <random>
 
 #include <memory>
 #include <queue>
+
+#include "error.h"
 
 
 extern std::mutex print_mutex;
@@ -20,45 +24,55 @@ typedef unsigned char byte_t;
 
 namespace gcutils {
 
+//===========
+// Data structures
+//==============
+
+	typedef std::function<void(void)> task_t;
+	//Runs bound functions asynchronously
+	struct TaskManager {
+		bool active = false;
+		std::queue<task_t> tasks;
+		std::mutex mtx;
+		std::condition_variable cv;
+		std::thread thr;
+		void run() {
+//			gcutils::print("Task Manager starting");
+			while(this->active) {
+				std::unique_lock<std::mutex> rlk(mtx);
+				while(this->tasks.empty()) {
+					this->cv.wait(rlk);
+				}
+				auto t = this->tasks.front();
+				this->tasks.pop();
+				rlk.unlock();
+				t();
+			}
+//			gcutils::print("Task Manager exiting");
+		}
+		void add_task(task_t task) {
+			std::unique_lock<std::mutex> lk(mtx);
+			this->tasks.push(task);
+			lk.unlock();
+			this->cv.notify_one();
+		}
+		TaskManager() {
+			this->active = true;
+			this->thr = std::thread(&TaskManager::run,this);
+	//		std::thread(&TaskManager::run,this).detach();
+		} ~TaskManager() {
+			this->thr.join();
+		}
+	};
+
+	extern TaskManager print_manager;
+
 	//=========
-	// GLOBAL
+	// Prints
 	//=========
 
 	int wrap(int,int,int);
 	extern std::function<void(std::string)> log_handler;
-
-	template <typename T>
-	extern std::queue<T> print_queue;
-
-	extern std::condition_variable print_cv;
-
-	//int prints = 0;
-
-	template <typename T>
-	void await_print_jobs() {
-		while(true) {
-			while(print_queue<T>.empty()) {
-				std::unique_lock<std::mutex> signal_lock(print_mutex);
-				 print_cv.wait(signal_lock);
-			}
-			/* Lock scope */ {
-				std::lock_guard<std::mutex> lk{print_mutex};
-				T job = print_queue<T>.front();
-				print_queue<T>.pop();
-				std::cout << job << std::flush;
-	//			std::cout << ++prints << job << std::endl;
-			}
-		}
-	}
-
-	template <typename T>
-	void add_to_print_queue(std::string job) {
-		{
-			std::lock_guard<std::mutex> lk{print_mutex};
-			print_queue<T>.push(job);
-			print_cv.notify_one();
-		}
-	}
 
 	template <class T>
 	void print(T t) {
@@ -66,6 +80,9 @@ namespace gcutils {
 			std::lock_guard<std::mutex> m{print_mutex};
 			std::cout << t << std::endl;
 		}
+//		print_manager.add_task([t](){
+//			std::cout << t << std::endl;
+//		});
 	}
 
 	template <class T,class... Args>
@@ -74,36 +91,54 @@ namespace gcutils {
 			std::lock_guard<std::mutex> m{print_mutex};
 			std::cout << t;
 		}
+//		print_manager.add_task([t](){
+//			std::cout << t;
+//		});
 		print(args...);
 	}
 
 	extern std::stringstream log_statement;
 	template <class T>
 	void log(T t) {
-		{
-			std::lock_guard<std::mutex> m{print_mutex};
+//		{
+//			std::lock_guard<std::mutex> m{print_mutex};
+//			log_statement << t;
+//			log_handler(log_statement.str());
+//		}
+		print_manager.add_task([t](){
 			log_statement << t;
 			log_handler(log_statement.str());
+//			print(log_statement.str());
 			log_statement.str("");
-		}
-		print(log_statement.str());
+		});
 	}
 
 	template <class T,class... Args>
 	void log(T t,Args... args) {
-		{
-			std::lock_guard<std::mutex> m{print_mutex};
+//		{
+//			std::lock_guard<std::mutex> m{print_mutex};
+//			log_statement << t;
+//		}
+		print_manager.add_task([t](){
 			log_statement << t;
-		}
+		});
+
 		gcutils::log(args...);
 	}
 
 	void print();
 
+	//================
+	//  Generic utils
+	//================
+
+	std::string get_timestamp();
+
+	std::string get_device_fingerprint();
+
 	//Byte utils/hex
 
 	std::string conv_bytes(size_t);
-	std::string fmt_bytes(unsigned char *bytes,size_t len);
 	std::string random_hex_string(int);
 	std::string as_hex(int);
 	std::string as_hex(std::string);
@@ -111,6 +146,15 @@ namespace gcutils {
 	std::string hex_decode_2b(std::string);
 	std::string simple_encrypt(std::string);
 	std::string simple_decrypt(std::string);
+
+	template <typename T>
+	size_t get_uid() {
+		const size_t _size = sizeof(T);
+		static std::random_device dev;
+		static std::mt19937 rng(dev());
+		std::uniform_int_distribution<T> dist(0, std::pow(2,_size*8)-1);
+		return dist(rng);
+	}
 
 	//Wait on a variable
 	struct Waiter {
@@ -156,13 +200,6 @@ namespace gcutils {
 	};
 
 	//=========
-	// UPnP
-	//=========
-
-	void create_upnp_mapping(unsigned short port);
-	void list_upnp_mappings();
-
-	//=========
 	// VECTOR
 	//=========
 
@@ -170,11 +207,19 @@ namespace gcutils {
 
 	template <class T>
 	int v_find(std::vector<T> v, T t) {
-		for(int i=0;i<v.size;i++) {
+		for(int i=0;i<v.size();i++) {
 			T e = v.at(i);
 			if((char*)e == (char*)t) return i;
 		}
 		return -1;
+	}
+
+	template <class T>
+	void remove(std::vector<T> &v, const T &t) {
+		unsigned idx = v_find(v,t);
+		if(idx >= 0) {
+			v.erase(v.begin()+idx);
+		}
 	}
 
 	template <typename T>
@@ -194,13 +239,22 @@ namespace gcutils {
 	}
 
 	template <typename K,class V>
-	bool contains(std::map<K,V> &m,K k) {
+	bool contains(const std::map<K,V> &m,const K &k) {
 		if(m.find(k) == m.end()) {
 			return false;
 		} else {
 			return true;
 		}
 	}
+
+	template <typename K,class V>
+	bool remove(std::map<K,V> &m,const K &k) {
+		if(contains(m,k) == false) return false;
+		m.erase(k);
+		return true;
+	}
+
+
 
 	std::vector<std::string> split(const std::string&,char);
 
@@ -214,16 +268,23 @@ namespace gcutils {
 	// I/O
 	//=========
 
-
-	std::string get_filename(std::string path);
-	size_t import_file(const std::string &filename,unsigned char*&);
-	std::vector<char> import_file(const std::string &filename);
+	std::string get_filename(std::filesystem::path path);
+	size_t import_file(std::filesystem::path path,unsigned char*&);
+	std::vector<char> import_file(std::filesystem::path path);
 	std::vector<std::string> getlines(std::vector<char>); //Converts char vector into string vector split by newline
-	bool export_file(std::string filename,unsigned char*,size_t size);
-	bool append_to_file(const std::string &filename,unsigned char*,size_t size);
-	bool file_exists(std::string filename);
-	size_t file_size(std::string path);
+	bool export_file(std::filesystem::path path,unsigned char*,size_t size);
+	bool append_to_file(std::filesystem::path path,unsigned char*,size_t size);
+	bool file_exists(std::filesystem::path path);
+	size_t file_size(std::filesystem::path path);
+	std::vector<std::filesystem::path> dir_listing(std::filesystem::path path);
+	std::vector<std::string> dir_listing_str(std::filesystem::path path);
+	std::filesystem::path make_relative_to(std::filesystem::path path,std::filesystem::path relpath,bool include_root = true);
+
+	void sanitize_path(std::string&);
+	void sanitize_path(std::filesystem::path&);
+	void ensure_path(std::filesystem::path);
 
 	bool make_directory(std::string);
-	bool create_file(std::string);
+	bool create_file(std::filesystem::path path);
+
 }
